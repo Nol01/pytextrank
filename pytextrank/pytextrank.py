@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 # encoding: utf-8
-
+import itertools
 from collections import defaultdict, OrderedDict
 from math import sqrt
 from operator import itemgetter
@@ -318,6 +318,98 @@ class TextRank:
                 visited_tokens.append(token.i)
                 visited_nodes.append(node_id)
 
+    def increment_edges(self, nodes0, node1):
+        """
+        increment the weight for an edge between the two given nodes,
+        creating the edge first if needed
+        """
+        if self.logger:
+            self.logger.debug("link {} {}".format(nodes0, node1))
+
+        for node0 in nodes0:
+            if self.lemma_graph.has_edge(node0, node1):
+                self.lemma_graph[node0][node1]["weight"] += self.edge_weight
+            else:
+                self.lemma_graph.add_edge(node0, node1, weight=self.edge_weight)
+
+    def link_sentence_wn(self, sent):
+        """
+        link nodes and edges into the lemma graph for one parsed sentence
+        """
+        from nltk.wsd import lesk
+        from spacy_wordnet.__utils__ import spacy2wordnet_pos
+
+        visited_tokens = []
+        visited_nodes = []
+
+        for i in range(sent.start, sent.end):
+            token = self.doc[i]
+
+            if token.pos_ in self.pos_kept:
+                # skip any stop words...
+                lemma = token.lemma_.lower().strip()
+
+                if lemma in self.stopwords and token.pos_ in self.stopwords[lemma]:
+                    continue
+
+                # WordNet synset
+                synsets = token._.wordnet.synsets()
+                syn = None
+                if len(synsets) > 1:
+                    syn = lesk([t.text for t in sent], token.text, spacy2wordnet_pos(token.pos))
+                elif len(synsets) == 1:
+                    syn = synsets[0]
+
+                # ...otherwise proceed
+                keys = []
+                if syn:
+                    for s in syn.lemmas():
+                        keys.append((s._name, token.pos_))
+                keys.append((token.lemma_, token.pos_))
+
+                node_ids = set()
+                for key in keys:
+                    if key not in self.seen_lemma:
+                        self.seen_lemma[key] = set([key[0]])
+                    else:
+                        self.seen_lemma[key].add(key[0])
+
+                    node_id = list(self.seen_lemma.keys()).index(key)
+                    node_ids.add(node_id)
+                    if not node_id in self.lemma_graph:
+                        self.lemma_graph.add_node(node_id, lemma=key[0])
+
+                if len(node_ids) > 1:
+                    for c in itertools.combinations(list(node_ids), 2):
+                        self.increment_edge(c[0], c[1])
+
+                if self.logger:
+                    self.logger.debug("visit {} {}".format(
+                        visited_tokens, visited_nodes
+                    ))
+                    self.logger.debug("range {}".format(
+                        list(range(len(visited_tokens) - 1, -1, -1))
+                    ))
+
+                for prev_token in range(len(visited_tokens) - 1, -1, -1):
+                    if self.logger:
+                        self.logger.debug("prev_tok {} {}".format(
+                            prev_token, (token.i - visited_tokens[prev_token])
+                        ))
+
+                    if (token.i - visited_tokens[prev_token]) <= self.token_lookback:
+                        self.increment_edges(node_ids, visited_nodes[prev_token])
+                    else:
+                        break
+
+                if self.logger:
+                    self.logger.debug(" -- {} {} {} {} {} {}".format(
+                        token.i, token.text, token.lemma_, token.pos_, visited_tokens, visited_nodes
+                    ))
+
+                visited_tokens.append(token.i)
+                visited_nodes = visited_nodes + list(node_ids)
+
     def collect_phrases(self, chunk):
         """
         collect instances of phrases from the lemma graph
@@ -360,7 +452,8 @@ class TextRank:
         t0 = time.time()
 
         for sent in self.doc.sents:
-            self.link_sentence(sent)
+            # self.link_sentence(sent)
+            self.link_sentence_wn(sent)
 
         if self.logger:
             self.logger.debug(self.seen_lemma)
